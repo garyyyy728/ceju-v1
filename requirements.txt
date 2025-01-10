@@ -1,0 +1,51 @@
+# pip install -r requirements.txt
+
+# base ----------------------------------------
+matplotlib>=3.7.5
+numpy>=1.24.4
+opencv-python>=4.10.0
+Pillow>=10.4.0
+PyYAML>=6.0.2
+scipy>=1.4.1
+torch==2.4.1
+tqdm>=4.67.1
+
+# qt gui -------------------------------------
+pyqt5>=5.15.11
+pyqt5-tools
+PyQt5-Qt5>=5.15.2
+PyQt5-sip>=12.15.0
+
+# networking ---------------------------------
+requests>=2.32.3
+urllib3>=2.2.3
+charset-normalizer>=3.4.1
+idna>=3.10
+certifi>=2024.12
+
+# plotting ------------------------------------
+seaborn>=0.13.2
+pandas>=2.0.3
+python-dateutil>=2.9.0
+pytz>=2024.2
+tzdata>=2024.2
+
+# dependencies ------------------------------
+colorama>=0.4.6  # for tqdm
+filelock>=3.16.1  # for torch
+fsspec>=2024.12.0  # for torch
+jinja2>=3.1.5  # for torch
+networkx>=3.1  # for torch
+sympy>=1.13.3  # for torch
+typing-extensions>=4.12.2  # for torch
+contourpy>=1.1.1  # for matplotlib
+cycler>=0.12.1  # for matplotlib
+fonttools>=4.55.3  # for matplotlib
+importlib-resources>=6.4.5  # for matplotlib
+kiwisolver>=1.4.7  # for matplotlib
+packaging>=24.2  # for matplotlib
+pyparsing>=3.1.4  # for matplotlib
+zipp>=3.20.2  # for matplotlib
+six>=1.17.0  # for python-dateutil
+MarkupSafe>=2.1.5  # for jinja2
+mpmath>=1.3.0  # for sympy
