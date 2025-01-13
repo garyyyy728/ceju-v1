@@ -31,8 +31,7 @@ def _create(name, pretrained=True, channels=3, classes=80, autoshape=True, verbo
     from utils.torch_utils import select_device
 
     file = Path(__file__).absolute()
-    check_requirements(requirements=file.parent / 'requirements.txt', exclude=('tensorboard', 'thop', 'opencv-python'))
-    set_logging(verbose=verbose)
+    sys.path.append(str(FILE.parents[0]))  # add yolov5/ to path
 
     save_dir = Path('') if str(name).endswith('.pt') else file.parent
     path = (save_dir / name).with_suffix('.pt')  # checkpoint path

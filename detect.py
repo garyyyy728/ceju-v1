@@ -14,7 +14,7 @@ import torch
 import torch.backends.cudnn as cudnn
 
 FILE = Path(__file__).absolute()
-sys.path.append(FILE.parents[0].as_posix())  # add yolov5/ to path
+sys.path.append(str(FILE.parents[0]))  # add yolov5/ to path
 
 from models.experimental import attempt_load
 from utils.datasets import LoadStreams, LoadImages

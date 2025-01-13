@@ -14,7 +14,7 @@ import torch.nn as nn
 from torch.utils.mobile_optimizer import optimize_for_mobile
 
 FILE = Path(__file__).absolute()
-sys.path.append(FILE.parents[0].as_posix())  # add yolov5/ to path
+sys.path.append(str(FILE.parents[0]))  # add yolov5/ to path
 
 from models.common import Conv
 from models.yolo import Detect

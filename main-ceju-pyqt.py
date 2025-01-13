@@ -27,6 +27,9 @@ from stereo.dianyuntu_yolo import preprocess, undistortion, getRectifyTransform,
     stereoMatchSGBM
 from stereo import stereoconfig
 
+FILE = Path(__file__).absolute()
+sys.path.append(str(FILE.parents[0]))  # add yolov5/ to path
+
 class DetThread(QThread):
     send_img = pyqtSignal(np.ndarray)
     send_raw = pyqtSignal(np.ndarray)
