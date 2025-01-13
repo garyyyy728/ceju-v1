@@ -12,9 +12,10 @@ import torch.backends.cudnn as cudnn
 import os
 import time
 import cv2
+from pathlib import Path
 
 from models.experimental import attempt_load
-from utils.datasets import LoadImages, LoadWebcam
+from utils.datasets import LoadImages, LoadWebcam, letterbox
 from utils.CustomMessageBox import MessageBox
 # LoadWebcam 的最后一个返回值改为 self.cap
 from utils.general import check_img_size, check_requirements, check_imshow, colorstr, non_max_suppression, \
@@ -24,8 +25,43 @@ from utils.torch_utils import select_device, load_classifier, time_sync
 from utils.capnums import Camera
 from dialog.rtsp_win import Window
 from stereo.dianyuntu_yolo import preprocess, undistortion, getRectifyTransform, draw_line, rectifyImage, \
-    stereoMatchSGBM
+    stereoMatchSGBM, get_d435_frames
 from stereo import stereoconfig
+
+FILE = Path(__file__).absolute()
+sys.path.append(str(FILE.parents[0]))  # add yolov5/ to path
+
+def letterbox(img, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True, stride=32):
+    # Resize and pad image while meeting stride-multiple constraints
+    shape = img.shape[:2]  # current shape [height, width]
+    if isinstance(new_shape, int):
+        new_shape = (new_shape, new_shape)
+
+    # Scale ratio (new / old)
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    if not scaleup:  # only scale down, do not scale up (for better test mAP)
+        r = min(r, 1.0)
+
+    # Compute padding
+    ratio = r, r  # width, height ratios
+    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
+    if auto:  # minimum rectangle
+        dw, dh = np.mod(dw, stride), np.mod(dh, stride)  # wh padding
+    elif scaleFill:  # stretch
+        dw, dh = 0.0, 0.0
+        new_unpad = (new_shape[1], new_shape[0])
+        ratio = new_shape[1] / shape[1], new_shape[0] / shape[0]  # width, height ratios
+
+    dw /= 2  # divide padding into 2 sides
+    dh /= 2
+
+    if shape[::-1] != new_unpad:  # resize
+        img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
+    return img, ratio, (dw, dh)
 
 class DetThread(QThread):
     send_img = pyqtSignal(np.ndarray)
@@ -36,18 +72,19 @@ class DetThread(QThread):
     send_percent = pyqtSignal(int)
     send_fps = pyqtSignal(str)
 
-    def __init__(self):
+    def __init__(self, stereo=None):
         super(DetThread, self).__init__()
-        self.weights = './yolov5s.pt'           # 设置权重
-        self.current_weight = './yolov5s.pt'    # 当前权重
-        self.source = '0'                       # 视频源
-        self.conf_thres = 0.25                  # 置信度
-        self.iou_thres = 0.45                   # iou
-        self.jump_out = False                   # 跳出循环
-        self.is_continue = True                 # 继续/暂停
-        self.percent_length = 1000              # 进度条
-        self.rate_check = True                  # 是否启用延时
-        self.rate = 100                         # 延时HZ
+        self.weights = './yolov5s.pt'           
+        self.current_weight = './yolov5s.pt'    
+        self.source = '0'                       
+        self.conf_thres = 0.25                  
+        self.iou_thres = 0.45                   
+        self.jump_out = False                   
+        self.is_continue = True                 
+        self.percent_length = 1000              
+        self.rate_check = True                  
+        self.rate = 100                         
+        self.stereo = stereo                    # 添加stereo对象
 
     @torch.no_grad()
     def run(self,
@@ -98,187 +135,203 @@ class DetThread(QThread):
             else:
                 dataset = LoadImages(self.source, img_size=imgsz, stride=stride)
 
-            # Run inference
-            if device.type != 'cpu':
-                model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
-            count = 0
-            # 跳帧检测
-            jump_count = 0
-            start_time = time.time()
-            dataset = iter(dataset)
+            # 预先分配内存
+            img = torch.zeros((1, 3, imgsz, imgsz), device=device)
+            if half:
+                img = img.half()
+            
             while True:
-                # 手动停止
                 if self.jump_out:
-                    self.vid_cap.release()
                     self.send_percent.emit(0)
                     self.send_msg.emit('停止')
                     break
-                # 临时更换模型
-                if self.current_weight != self.weights:
-                    # Load model
-                    model = attempt_load(self.weights, map_location=device)  # load FP32 model
-                    num_params = 0
-                    for param in model.parameters():
-                        num_params += param.numel()
-                    stride = int(model.stride.max())  # model stride
-                    imgsz = check_img_size(imgsz, s=stride)  # check image size
-                    names = model.module.names if hasattr(model, 'module') else model.names  # get class names
-                    if half:
-                        model.half()  # to FP16
-                    # Run inference
-                    if device.type != 'cpu':
-                        model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
-                    self.current_weight = self.weights
-                # 暂停开关
+                    
                 if self.is_continue:
-                    path, img, im0s, self.vid_cap = next(dataset)
-                    # jump_count += 1
-                    # if jump_count % 5 != 0:
-                    #     continue
-                    count += 1
-                    # 每三十帧刷新一次输出帧率
-                    if count % 30 == 0 and count >= 30:
-                        fps = int(30/(time.time()-start_time))
-                        self.send_fps.emit('fps：'+str(fps))
-                        start_time = time.time()
-                    if self.vid_cap:
-                        percent = int(count/self.vid_cap.get(cv2.CAP_PROP_FRAME_COUNT)*self.percent_length)
-                        self.send_percent.emit(percent)
-                    else:
-                        percent = self.percent_length
-
-                    statistic_dic = {name: 0 for name in names}
-                    img = torch.from_numpy(img).to(device)
-                    img = img.half() if half else img.float()  # uint8 to fp16/32
-                    img /= 255.0  # 0 - 255 to 0.0 - 1.0
-                    if img.ndimension() == 3:
-                        img = img.unsqueeze(0)
-
-                    pred = model(img, augment=augment)[0]
-
-                    # Apply NMS
-                    pred = non_max_suppression(pred, self.conf_thres, self.iou_thres, classes, agnostic_nms, max_det=max_det)
-                    # Process detections
-                    for i, det in enumerate(pred):  # detections per image
-                        im0 = im0s.copy()
-
-                        if len(det):
-                            # Rescale boxes from img_size to im0 size
-                            det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
-
-                            # Write results
-                            for *xyxy, conf, cls in reversed(det):
-                                x = (xyxy[0] + xyxy[2]) / 2
-                                y = (xyxy[1] + xyxy[3]) / 2
-                                if (0 < x <= 1280):
-                                    height_0, width_0 = im0.shape[0:2]
-                                    iml = im0[0:int(height_0), 0:int(width_0 / 2)]
-                                    imr = im0[0:int(height_0), int(width_0 / 2):int(width_0)]
-
-                                    height, width = iml.shape[0:2]
-                                    config = stereoconfig.stereoCamera()
-                                    map1x, map1y, map2x, map2y, Q = getRectifyTransform(720, 1280, config)
-                                    iml_rectified, imr_rectified = rectifyImage(iml, imr, map1x, map1y, map2x,
-                                                                                map2y)
-                                    line = draw_line(iml_rectified, imr_rectified)
-                                    iml = undistortion(iml, config.cam_matrix_left, config.distortion_l)
-                                    imr = undistortion(imr, config.cam_matrix_right, config.distortion_r)
-                                    iml_, imr_ = preprocess(iml, imr)
-                                    iml_rectified_l, imr_rectified_r = rectifyImage(iml_, imr_, map1x, map1y, map2x,
-                                                                                    map2y)
-                                    disp, _ = stereoMatchSGBM(iml_rectified_l, imr_rectified_r, True)
-                                    points_3d = cv2.reprojectImageTo3D(disp, Q)
-
-                                    distance = ((points_3d[int(y), int(x), 0] ** 2 + points_3d[int(y), int(x), 1] ** 2 +
-                                                 points_3d[int(y), int(x), 2] ** 2) ** 0.5) / 1000
-                                    distance = '%.2f' % distance
-                                    c = int(cls)  # integer class
-                                    statistic_dic[names[c]] += 1
-                                    label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
-                                    label = label + "  " + "dis:" + str(distance) + "m"
-                                    # im0 = plot_one_box_PIL(xyxy, im0, label=label, color=colors(c, True), line_thickness=line_thickness)  # 中文标签画框，但是耗时会增加
-                                    plot_one_box(xyxy, im0, label=label, color=colors(c, True),
-                                                 line_thickness=line_thickness)
-
-                    # 控制视频发送频率
-                    if self.rate_check:
-                        time.sleep(1/self.rate)
-                    # print(type(im0s))
-                    self.send_img.emit(im0)
-                    self.send_raw.emit(im0s if isinstance(im0s, np.ndarray) else im0s[0])
-                    self.send_statistic.emit(statistic_dic)
-                    if percent == self.percent_length:
-                        self.send_percent.emit(0)
-                        self.send_msg.emit('检测结束')
-                        # 正常跳出循环
-                        break
-
+                    try:
+                        t1 = time.time()
+                        
+                        # 获取双目图像
+                        left_img, right_img = get_d435_frames(self.stereo)
+                        if left_img is None or right_img is None:
+                            continue
+                        
+                        # 合并左右图像用于显示
+                        im0s = np.hstack((left_img, right_img))
+                        
+                        # 转换为三通道以适应YOLOv5（使用更快的转换方法）
+                        if len(im0s.shape) == 2:
+                            im0s = np.stack((im0s,)*3, axis=-1)
+                        
+                        # 准备输入图像（优化resize操作）
+                        img_sized = cv2.resize(im0s, (imgsz, imgsz))
+                        img_array = img_sized.transpose((2, 0, 1))[::-1]
+                        img_array = np.ascontiguousarray(img_array)
+                        img.copy_(torch.from_numpy(img_array))
+                        img /= 255.0
+                        
+                        # 推理检测
+                        pred = model(img, augment=augment)[0]
+                        pred = non_max_suppression(pred, self.conf_thres, self.iou_thres, 
+                                                classes, agnostic_nms, max_det=max_det)
+                        
+                        # 处理检测结果
+                        for i, det in enumerate(pred):
+                            if len(det):
+                                # 缩放坐标
+                                det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0s.shape).round()
+                                
+                                # 在图像上绘制结果
+                                for *xyxy, conf, cls in reversed(det):
+                                    # 获取检测框中心点坐标
+                                    x = (xyxy[0] + xyxy[2]) / 2
+                                    y = (xyxy[1] + xyxy[3]) / 2
+                                    
+                                    # 判断点是否在左图中
+                                    if x <= im0s.shape[1] // 2:
+                                        # 计算在左图中的实际坐标
+                                        xl = x
+                                        yl = y
+                                        
+                                        # 使用视差计算深度
+                                        height_0, width_0 = im0s.shape[0:2]
+                                        iml = im0s[0:height_0, 0:width_0//2]
+                                        imr = im0s[0:height_0, width_0//2:width_0]
+                                        
+                                        try:
+                                            # 计算深度
+                                            disp, _ = stereoMatchSGBM(iml, imr, True)
+                                            points_3d = cv2.reprojectImageTo3D(disp, self.stereo.Q)
+                                            
+                                            # 计算距离
+                                            distance = ((points_3d[int(yl), int(xl), 0] ** 2 + 
+                                               points_3d[int(yl), int(xl), 1] ** 2 + 
+                                               points_3d[int(yl), int(xl), 2] ** 2) ** 0.5) / 1000
+                                            
+                                            # 更新标签显示类别、置信度和距离
+                                            c = int(cls)
+                                            label = f'{names[c]} {conf:.2f} {distance:.2f}m'
+                                        except Exception as e:
+                                            # 如果无法计算距离，只显示类别和置信度
+                                            c = int(cls)
+                                            label = f'{names[c]} {conf:.2f}'
+                                    else:
+                                        # 如果目标在右图中，只显示类别和置信度
+                                        c = int(cls)
+                                        label = f'{names[c]} {conf:.2f}'
+                                    
+                                    # 绘制检测框和标签
+                                    plot_one_box(xyxy, im0s, label=label, color=colors(c, True),
+                                                line_thickness=line_thickness)
+                        
+                        # 计算FPS
+                        fps = 1.0 / (time.time() - t1)
+                        self.send_fps.emit(f'FPS：{fps:.1f}')
+                        
+                        # 发送处理后的图像
+                        self.send_img.emit(im0s)
+                        
+                        # 控制帧率
+                        if self.rate_check:
+                            time.sleep(max(1/self.rate - (time.time() - t1), 0))
+                            
+                    except Exception as e:
+                        self.send_msg.emit(f'处理帧错误: {str(e)}')
+                        continue
+                        
         except Exception as e:
-            self.send_msg.emit('%s' % e)
+            self.send_msg.emit(str(e))
 
 
 class MainWindow(QMainWindow, Ui_mainWindow):
     def __init__(self, parent=None):
-        super(MainWindow, self).__init__(parent)
-        self.setupUi(self)
-        self.m_flag = False
-        # win10的CustomizeWindowHint模式，边框上面有一段空白。
-        # 不想看到空白可以用FramelessWindowHint模式，但是需要重写鼠标事件才能通过鼠标拉伸窗口，比较麻烦
-        # 不嫌麻烦可以试试, 写了一半不想写了，累死人
-        self.setWindowFlags(Qt.CustomizeWindowHint)
-        # self.setWindowFlags(Qt.FramelessWindowHint)
-        # 自定义标题栏按钮
-        self.minButton.clicked.connect(self.showMinimized)
-        self.maxButton.clicked.connect(self.max_or_restore)
-        self.closeButton.clicked.connect(self.close)
+        try:
+            super(MainWindow, self).__init__(parent)
+            self.setupUi(self)
+            
+            self.m_flag = False
+            # win10的CustomizeWindowHint模式，边框上面有一段空白。
+            # 不想看到空白可以用FramelessWindowHint模式，但是需要重写鼠标事件才能通过鼠标拉伸窗口，比较麻烦
+            # 不嫌麻烦可以试试, 写了一半不想写了，累死人
+            self.setWindowFlags(Qt.CustomizeWindowHint)
+            # self.setWindowFlags(Qt.FramelessWindowHint)
+            # 自定义标题栏按钮
+            self.minButton.clicked.connect(self.showMinimized)
+            self.maxButton.clicked.connect(self.max_or_restore)
+            self.closeButton.clicked.connect(self.close)
 
-        # 定时清空自定义状态栏上的文字
-        self.qtimer = QTimer(self)
-        self.qtimer.setSingleShot(True)
-        self.qtimer.timeout.connect(lambda: self.statistic_label.clear())
+            # 定时清空自定义状态栏上的文字
+            self.qtimer = QTimer(self)
+            self.qtimer.setSingleShot(True)
+            self.qtimer.timeout.connect(lambda: self.statistic_label.clear())
 
-        # 自动搜索模型
-        self.comboBox.clear()
-        self.pt_list = os.listdir('./pt')
-        self.pt_list = [file for file in self.pt_list if file.endswith('.pt')]
-        self.pt_list.sort(key=lambda x: os.path.getsize('./pt/'+x))
-        self.comboBox.clear()
-        self.comboBox.addItems(self.pt_list)
-        self.qtimer_search = QTimer(self)
-        self.qtimer_search.timeout.connect(lambda: self.search_pt())
-        self.qtimer_search.start(2000)
+            # 自动搜索模型
+            self.comboBox.clear()
+            self.pt_list = os.listdir('./pt')
+            self.pt_list = [file for file in self.pt_list if file.endswith('.pt')]
+            self.pt_list.sort(key=lambda x: os.path.getsize('./pt/'+x))
+            self.comboBox.clear()
+            self.comboBox.addItems(self.pt_list)
+            self.qtimer_search = QTimer(self)
+            self.qtimer_search.timeout.connect(lambda: self.search_pt())
+            self.qtimer_search.start(2000)
 
-        # yolov5线程
-        self.det_thread = DetThread()
-        self.model_type = self.comboBox.currentText()
-        self.det_thread.weights = "./pt/%s" % self.model_type           # 权重
-        self.det_thread.source = '0'                                    # 默认打开本机摄像头，无需保存到配置文件
-        self.det_thread.percent_length = self.progressBar.maximum()
-        self.det_thread.send_raw.connect(lambda x: self.show_image(x, self.raw_video))
-        self.det_thread.send_img.connect(lambda x: self.show_image(x, self.out_video))
-        self.det_thread.send_statistic.connect(self.show_statistic)
-        self.det_thread.send_msg.connect(lambda x: self.show_msg(x))
-        self.det_thread.send_percent.connect(lambda x: self.progressBar.setValue(x))
-        self.det_thread.send_fps.connect(lambda x: self.fps_label.setText(x))
+            # 初始化相机
+            try:
+                # 确保之前的相机实例被正确释放
+                if hasattr(self, 'stereo'):
+                    try:
+                        self.stereo.pipeline.stop()
+                    except:
+                        pass
+                    self.stereo = None
+                
+                self.stereo = stereoconfig.stereoCamera()
+                print("相机初始化成功")
+                
+                # 测试获取一帧图像
+                left_img, right_img = get_d435_frames(self.stereo)
+                if left_img is None or right_img is None:
+                    raise Exception("无法获取图像")
+                
+            except Exception as e:
+                self.show_msg(f"相机初始化失败: {str(e)}")
+                self.stereo = None
+                
+            # 创建检测线程
+            self.det_thread = DetThread(stereo=self.stereo)
+            
+            self.model_type = self.comboBox.currentText()
+            self.det_thread.weights = "./pt/%s" % self.model_type           # 权重
+            self.det_thread.source = '0'                                    # 默认打开本机摄像头，无需保存到配置文件
+            self.det_thread.percent_length = self.progressBar.maximum()
+            self.det_thread.send_raw.connect(lambda x: self.show_image(x, self.raw_video))
+            self.det_thread.send_img.connect(lambda x: self.show_image(x, self.out_video))
+            self.det_thread.send_statistic.connect(self.show_statistic)
+            self.det_thread.send_msg.connect(lambda x: self.show_msg(x))
+            self.det_thread.send_percent.connect(lambda x: self.progressBar.setValue(x))
+            self.det_thread.send_fps.connect(lambda x: self.fps_label.setText(x))
 
-        self.fileButton.clicked.connect(self.open_file)
-        self.cameraButton.clicked.connect(self.chose_cam)
-        self.rtspButton.clicked.connect(self.chose_rtsp)
+            self.fileButton.clicked.connect(self.open_file)
+            self.cameraButton.clicked.connect(self.chose_cam)
+            self.rtspButton.clicked.connect(self.chose_rtsp)
 
-        self.runButton.clicked.connect(self.run_or_continue)
-        self.stopButton.clicked.connect(self.stop)
+            self.runButton.clicked.connect(self.run_or_continue)
+            self.stopButton.clicked.connect(self.stop)
 
-        self.comboBox.currentTextChanged.connect(self.change_model)
-        # self.comboBox.currentTextChanged.connect(lambda x: self.statistic_msg('模型切换为%s' % x))
-        self.confSpinBox.valueChanged.connect(lambda x: self.change_val(x, 'confSpinBox'))
-        self.confSlider.valueChanged.connect(lambda x: self.change_val(x, 'confSlider'))
-        self.iouSpinBox.valueChanged.connect(lambda x: self.change_val(x, 'iouSpinBox'))
-        self.iouSlider.valueChanged.connect(lambda x: self.change_val(x, 'iouSlider'))
-        self.rateSpinBox.valueChanged.connect(lambda x: self.change_val(x, 'rateSpinBox'))
-        self.rateSlider.valueChanged.connect(lambda x: self.change_val(x, 'rateSlider'))
+            self.comboBox.currentTextChanged.connect(self.change_model)
+            # self.comboBox.currentTextChanged.connect(lambda x: self.statistic_msg('模型切换为%s' % x))
+            self.confSpinBox.valueChanged.connect(lambda x: self.change_val(x, 'confSpinBox'))
+            self.confSlider.valueChanged.connect(lambda x: self.change_val(x, 'confSlider'))
+            self.iouSpinBox.valueChanged.connect(lambda x: self.change_val(x, 'iouSpinBox'))
+            self.iouSlider.valueChanged.connect(lambda x: self.change_val(x, 'iouSlider'))
+            self.rateSpinBox.valueChanged.connect(lambda x: self.change_val(x, 'rateSpinBox'))
+            self.rateSlider.valueChanged.connect(lambda x: self.change_val(x, 'rateSlider'))
 
-        self.checkBox.clicked.connect(self.checkrate)
-        self.load_setting()
+            self.checkBox.clicked.connect(self.checkrate)
+            self.load_setting()
+
+        except Exception as e:
+            print(f"初始化错误: {str(e)}")
 
     def search_pt(self):
         pt_list = os.listdir('./pt')
@@ -459,6 +512,10 @@ class MainWindow(QMainWindow, Ui_mainWindow):
 
     # 继续/暂停
     def run_or_continue(self):
+        if self.stereo is None:
+            self.show_msg("相机未正确初始化，请检查连接")
+            return
+            
         self.det_thread.jump_out = False
         if self.runButton.isChecked():
             self.det_thread.is_continue = True
@@ -534,21 +591,41 @@ class MainWindow(QMainWindow, Ui_mainWindow):
             print(repr(e))
 
     def closeEvent(self, event):
-        # 如果摄像头开着，先把摄像头关了再退出，否则极大可能可能导致检测线程未退出
-        self.det_thread.jump_out = True
-        # 退出时，保存设置
-        config_file = 'config/setting.json'
-        config = dict()
-        config['iou'] = self.confSpinBox.value()
-        config['conf'] = self.iouSpinBox.value()
-        config['rate'] = self.rateSpinBox.value()
-        config['check'] = self.checkBox.checkState()
-        config_json = json.dumps(config, ensure_ascii=False, indent=2)
-        with open(config_file, 'w', encoding='utf-8') as f:
-            f.write(config_json)
-        MessageBox(
-            self.closeButton, title='提示', text='请稍等，正在关闭程序。。。', time=2000, auto=True).exec_()
-        sys.exit(0)
+        try:
+            # 如果摄像头开着，先把摄像头关了再退出
+            self.det_thread.jump_out = True
+            if hasattr(self, 'stereo'):
+                self.stereo.pipeline.stop()
+            
+            # 退出时，保存设置
+            config_file = 'config/setting.json'
+            config = dict()
+            config['iou'] = self.confSpinBox.value()
+            config['conf'] = self.iouSpinBox.value()
+            config['rate'] = self.rateSpinBox.value()
+            config['check'] = self.checkBox.checkState()
+            config_json = json.dumps(config, ensure_ascii=False, indent=2)
+            with open(config_file, 'w', encoding='utf-8') as f:
+                f.write(config_json)
+            MessageBox(
+                self.closeButton, title='提示', text='请稍等，正在关闭程序。。。', time=2000, auto=True).exec_()
+            sys.exit(0)
+        except Exception as e:
+            print(f"关闭错误: {e}")
+            sys.exit(0)
+
+    def process_frame(self):
+        try:
+            # 获取双目图像
+            left_img, right_img = get_d435_frames(self.stereo)
+            if left_img is None or right_img is None:
+                print("无法获取有效的双目图像")
+                return
+            
+            # 处理图像...
+            
+        except Exception as e:
+            print(f"处理帧错误: {e}")
 
 
 if __name__ == "__main__":

@@ -24,6 +24,8 @@ from utils.torch_utils import select_device, load_classifier, time_sync
 from utils.capnums import Camera
 from dialog.rtsp_win import Window
 
+FILE = Path(__file__).absolute()
+sys.path.append(str(FILE.parents[0]))  # add yolov5/ to path
 
 class DetThread(QThread):
     send_img = pyqtSignal(np.ndarray)
