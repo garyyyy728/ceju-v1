@@ -1,19 +1,56 @@
- # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import cv2
 import numpy as np
+import pyrealsense2 as rs
+import time
+
+def get_d435_frames(stereo):
+    """获取D435双目红外图像"""
+    try:
+        # 单次尝试获取帧，减少重试带来的延迟
+        frames = stereo.pipeline.wait_for_frames(timeout_ms=1000)
+        if not frames:
+            return None, None
+            
+        # 获取左右红外图像
+        left_frame = frames.get_infrared_frame(1)
+        right_frame = frames.get_infrared_frame(2)
+        
+        if not left_frame or not right_frame:
+            return None, None
+        
+        # 转换为numpy数组（使用共享内存）
+        left_img = np.asanyarray(left_frame.get_data())
+        right_img = np.asanyarray(right_frame.get_data())
+        
+        if left_img is None or right_img is None:
+            return None, None
+        
+        # 预处理
+        left_img, right_img = preprocess(left_img, right_img)
+        
+        return left_img, right_img
+        
+    except Exception as e:
+        print(f"获取双目图像错误: {str(e)}")
+        return None, None
 
 # 预处理
 def preprocess(img1, img2):
-    # 彩色图->灰度图
-    if(img1.ndim == 3):#判断为三维数组
-        img1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)  # 通过OpenCV加载的图像通道顺序是BGR
-    if(img2.ndim == 3):
+    """预处理函数"""
+    # 确保图像是uint8类型并且是单通道
+    if len(img1.shape) > 2:
+        img1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+    if len(img2.shape) > 2:
         img2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
-
-    # 直方图均衡
-    img1 = cv2.equalizeHist(img1)
-    img2 = cv2.equalizeHist(img2)
-
+    
+    # 直方图均衡化
+    try:
+        img1 = cv2.equalizeHist(img1.astype(np.uint8))
+        img2 = cv2.equalizeHist(img2.astype(np.uint8))
+    except cv2.error:
+        pass
+        
     return img1, img2
 
 
@@ -27,6 +64,9 @@ def undistortion(image, camera_matrix, dist_coeff):
 # 获取畸变校正和立体校正的映射变换矩阵、重投影矩阵
 # @param：config是一个类，存储着双目标定的参数:config = stereoconfig.stereoCamera()
 def getRectifyTransform(height, width, config):
+    """
+    获取畸变校正和立体校正的映射变换矩阵、重投影矩阵
+    """
     # 读取内参和外参
     left_K = config.cam_matrix_left
     right_K = config.cam_matrix_right
