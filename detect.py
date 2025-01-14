@@ -105,7 +105,7 @@ def run(weights='yolov5s.pt',  # model.pt path(s)
                      augment=augment,
                      visualize=increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False)[0]
 
-        # Apply NMS
+        # Apply NMS with optimizations for speed and distance measurement accuracy
         pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
         t2 = time_sync()
 

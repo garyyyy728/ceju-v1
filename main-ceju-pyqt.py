@@ -335,7 +335,7 @@ class MainWindow(QMainWindow, Ui_mainWindow):
 
     def search_pt(self):
         pt_list = os.listdir('./pt')
-        pt_list = [file for file in pt_list if file.endswith('.pt')]
+        pt_list = [file for file in self.pt_list if file.endswith('.pt')]
         pt_list.sort(key=lambda x: os.path.getsize('./pt/' + x))
 
         if pt_list != self.pt_list:
