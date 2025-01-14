@@ -166,6 +166,10 @@ def stereoMatchSGBM(left_image, right_image, down_scale=False):
     trueDisp_left = disparity_left.astype(np.float32) / 16.
     trueDisp_right = disparity_right.astype(np.float32) / 16.
 
+    # 优化视差图
+    trueDisp_left = cv2.medianBlur(trueDisp_left, 5)
+    trueDisp_right = cv2.medianBlur(trueDisp_right, 5)
+
     return trueDisp_left, trueDisp_right
 
 
