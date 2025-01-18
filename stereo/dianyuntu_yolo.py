@@ -174,8 +174,3 @@ def hw3ToN3(points):
     points_ = np.hstack((points_1, points_2, points_3))
 
     return points_
-
-
-
-
-

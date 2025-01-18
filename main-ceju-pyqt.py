@@ -12,6 +12,7 @@ import torch.backends.cudnn as cudnn
 import os
 import time
 import cv2
+import pyrealsense2 as rs
 from pathlib import Path
 
 from models.experimental import attempt_load
