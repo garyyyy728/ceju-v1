@@ -29,11 +29,17 @@ def get_d435_frames(stereo):
         # 预处理
         left_img, right_img = preprocess(left_img, right_img)
         
-        return left_img, right_img
+        # 计算视差
+        disparity, _ = stereoMatchSGBM(left_img, right_img, True)
+        
+        # 计算距离
+        points_3d = cv2.reprojectImageTo3D(disparity, stereo.Q)
+        
+        return left_img, right_img, points_3d
         
     except Exception as e:
         print(f"获取双目图像错误: {str(e)}")
-        return None, None
+        return None, None, None
 
 # 预处理
 def preprocess(img1, img2):
@@ -174,8 +180,3 @@ def hw3ToN3(points):
     points_ = np.hstack((points_1, points_2, points_3))
 
     return points_
-
-
-
-
-
